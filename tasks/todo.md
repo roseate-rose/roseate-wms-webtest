@@ -19,14 +19,28 @@
 - [x] `tests/inventory/inbound.spec.ts`：H5 入库，条码/HB 编码识别，批次表单，采购单位换算
 - [x] `tests/inventory/stock-report.spec.ts`：/stock 页状态筛选，行背景颜色校验
 - [x] `tests/products/products.spec.ts`：商品列表、搜索（名称/编码/条码）、建档、详情页批次明细、FIFO 不变式
-- [ ] `tests/reports/export.spec.ts`：admin 下载 CSV/xlsx，验证 Content-Disposition
+- [x] `tests/reports/export.spec.ts`：admin 下载 CSV/xlsx，验证 Content-Disposition
 
-## Stage 2 — 批量导入流程
+## Stage 2 — 边界与缺陷覆盖（完成）
+
+- [x] `tests/regression/fifo.spec.ts`：FIFO 跨批次分配、超额预占 409、耗尽再预占 409、重复发货 409、不存在订单/商品 404
+- [x] `tests/regression/inbound-edge.spec.ts`：入库输入校验（无 batch_no/expiry/负数量/负成本/未建档）、[已知缺陷] 批次合并成本覆盖
+- [x] `tests/regression/expiry-boundary.spec.ts`：到期日边界 today-1=expired, today+30=warning(包含), today+31=healthy；[已知缺陷] today=warning 而非 expired
+
+## Stage 3 — 批量导入流程（待做）
 
 - [ ] `tests/inbound-import/inbound-import.spec.ts`：上传 CSV → 预览 → 提交 → 验证库存
 - [ ] `tests/orders-import/orders-import.spec.ts`：上传订单 CSV → 预览 → 提交 → 验证预占
 
+## 已发现主项目缺陷
+
+| 编号 | 位置 | 描述 | 测试用例 |
+|------|------|------|----------|
+| BUG-01 | `app.py:295` `apply_inbound_payload` | 批次合并时 `batch.cost = cost` 直接覆盖，应为加权平均 | `regression/inbound-edge.spec.ts` "[已知缺陷] 批次合并时成本被覆盖而非加权平均" |
+| BUG-02 | `services/import_service.py:13` `classify_expiry_status` | `expiry_date < today` 使用严格小于，今天到期显示为 warning 而非 expired | `regression/expiry-boundary.spec.ts` "[已知缺陷] 到期日 = 今天 → 应为 expired" |
+
 ## 已知问题 / 待确认
 
 - `helpers/auth.ts` 中 `injectToken` 使用的 localStorage key 需首次运行后验证
-- 种子日期基准 2026-03-13，warning 窗口 ≤30 天；若运行时日期偏移需重新评估 expiry_date
+- 每次完整运行前必须先执行 `python3 seed/seed.py` 重置 DB（测试不自带清理）
+- 种子日期基准为运行当日，`classify_expiry_status` 边界依赖系统时钟
