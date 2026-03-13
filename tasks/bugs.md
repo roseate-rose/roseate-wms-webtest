@@ -7,13 +7,13 @@
 
 | ID | 严重度 | 状态 | 描述 |
 |----|--------|------|------|
-| BUG-01 | 🔴 高 | Open | 批次合并成本覆盖（应加权平均） |
-| BUG-02 | 🟡 中 | Open | 今天到期批次误判为 warning |
-| BUG-03 | 🔴 高 | Open | 订单同步无幂等性，重复 webhook 创建重复订单 |
-| BUG-04 | 🔴 高 | Open | 商品条码无唯一约束，条码碰撞导致入库命中不确定 |
-| BUG-05 | 🟡 中 | Open | RBAC 不一致：staff 可创建单个商品，但不能批量导入 |
-| OBS-01 | 🟡 中 | Open | 遗留调试端点 `/api/v1/inventory/test` 泄露用户身份 |
-| OBS-02 | 🟡 中 | Open | staff 可调用 `orders/fulfill` 永久扣减库存（是否符合业务意图？） |
+| BUG-01 | 🔴 高 | ✅ Fixed | 批次合并成本覆盖（已改为加权平均，commit `28e49eb`） |
+| BUG-02 | 🟡 中 | ✅ Fixed | 今天到期批次误判为 warning（`<=` 修复，commit `28e49eb`） |
+| BUG-03 | 🔴 高 | ✅ Fixed | 订单同步幂等性（通过 `external_order_no` 去重，commit `8a3f36a`） |
+| BUG-04 | 🔴 高 | ✅ Fixed | 商品条码 API 层唯一校验 + 入库歧义拦截（commit `4dfb0ad`） |
+| BUG-05 | 🟡 中 | ✅ Fixed | `POST /api/v1/products` 改为 `@admin_required`（commit `4dfb0ad`） |
+| OBS-01 | 🟡 中 | ✅ Fixed | `/api/v1/inventory/test` 仅 debug 模式注册，生产返回 404（commit `4dfb0ad`） |
+| OBS-02 | 🟡 中 | ✅ Fixed | `orders/fulfill` 改为 `@admin_required`（commit `8a3f36a`） |
 
 ---
 
@@ -23,7 +23,7 @@
 
 | 字段 | 内容 |
 |------|------|
-| **状态** | 🔴 Open |
+| **状态** | ✅ Fixed（commit `28e49eb`） |
 | **严重度** | 高（成本核算错误，影响财务报表） |
 | **位置** | `backend/app.py` → `apply_inbound_payload()` line 295 |
 | **发现测试** | `tests/regression/inbound-edge.spec.ts` — `[已知缺陷] 批次合并时成本被覆盖而非加权平均` |
@@ -79,7 +79,7 @@ if batch:
 
 | 字段 | 内容 |
 |------|------|
-| **状态** | 🔴 Open |
+| **状态** | ✅ Fixed（commit `28e49eb`） |
 | **严重度** | 中（影响看板数量、库存筛选页，运营人员可能误判库存状态） |
 | **位置** | `backend/services/import_service.py` → `classify_expiry_status()` line 13 |
 | **发现测试** | `tests/regression/expiry-boundary.spec.ts` — `[已知缺陷] 到期日 = 今天 → 应为 expired，当前错误返回 warning` |
@@ -130,7 +130,7 @@ if expiry_date <= today:          # 改为 <=，今天到期视为已过期
 
 | 字段 | 内容 |
 |------|------|
-| **状态** | 🔴 Open |
+| **状态** | ✅ Fixed（commit `8a3f36a`） |
 | **严重度** | 高（电商 webhook 重推导致库存被多倍预占） |
 | **位置** | `backend/app.py` → `create_sales_order()` / `sync_order()` |
 | **发现测试** | `tests/regression/order-idempotency.spec.ts` — `[已知缺陷] 相同 channel+SKU 重复 sync` |
@@ -172,7 +172,7 @@ if existing:
 
 | 字段 | 内容 |
 |------|------|
-| **状态** | 🔴 Open |
+| **状态** | ✅ Fixed（commit `4dfb0ad`） |
 | **严重度** | 高（条码碰撞导致入库、识别命中不确定） |
 | **位置** | `backend/models.py:59` Product.barcode 列；`app.py:826` create_product 校验 |
 | **发现测试** | `tests/regression/barcode-collision.spec.ts` |
@@ -206,26 +206,18 @@ if barcode and Product.query.filter_by(barcode=barcode).first():
 
 | 字段 | 内容 |
 |------|------|
-| **状态** | 🟡 Open |
+| **状态** | ✅ Fixed（commit `4dfb0ad`） |
 | **严重度** | 中（权限边界不清晰） |
-| **位置** | `backend/app.py:800` `POST /api/v1/products` |
-| **发现测试** | `tests/regression/rbac-api.spec.ts` — `[已知缺陷] staff 创建商品应返回 403` |
+| **位置** | `backend/app.py` `POST /api/v1/products` |
+| **验证测试** | `tests/regression/rbac-api.spec.ts` — `staff 调用 POST /api/v1/products 返回 403` |
 
-### 不一致点
+### 修复后状态
 
 | 端点 | 装饰器 | staff 可用？ |
 |------|--------|------------|
-| `POST /api/v1/products` | `@jwt_required()` | ✅ 可 |
+| `POST /api/v1/products` | `@admin_required` | ❌ 不可（已修复） |
 | `POST /api/v1/products/import` | `@admin_required` | ❌ 不可 |
 | `POST /api/v1/channel-mappings` | `@admin_required` | ❌ 不可 |
-
-### 建议修复
-
-```python
-@app.post("/api/v1/products")
-@admin_required   # 改为 admin_required，与 import 端点保持一致
-def create_product():
-```
 
 ---
 
@@ -233,14 +225,14 @@ def create_product():
 
 | 字段 | 内容 |
 |------|------|
-| **状态** | 🟡 Open |
+| **状态** | ✅ Fixed（commit `4dfb0ad`） |
 | **严重度** | 中（任何有效 JWT 均可获取用户名和角色） |
-| **位置** | `backend/app.py:742` `GET /api/v1/inventory/test` |
-| **发现测试** | `tests/regression/rbac-api.spec.ts` — `[安全观察] GET /api/v1/inventory/test` |
+| **位置** | `backend/app.py` `GET /api/v1/inventory/test` |
+| **验证测试** | `tests/regression/rbac-api.spec.ts` — `GET /api/v1/inventory/test 调试端点已移除` |
 
-### 建议修复
+### 实际修复方式
 
-删除该端点，或仅在 `app.config["DEBUG"]` 为 True 时注册。
+端点仅在 `ENABLE_DEBUG_ENDPOINTS=1` 环境变量下注册，生产环境返回 404。
 
 ---
 
@@ -248,13 +240,11 @@ def create_product():
 
 | 字段 | 内容 |
 |------|------|
-| **状态** | 🟡 Open（待业务确认） |
-| **严重度** | 中（取决于业务设计意图） |
-| **位置** | `backend/app.py:1363` `POST /api/v1/orders/fulfill` |
-| **发现测试** | `tests/regression/rbac-api.spec.ts` — `[安全观察] staff 可调用 fulfill` |
+| **状态** | ✅ Fixed（commit `8a3f36a`） |
+| **严重度** | 中（不可逆操作，需管理员权限） |
+| **位置** | `backend/app.py` `POST /api/v1/orders/fulfill` |
+| **验证测试** | `tests/regression/rbac-api.spec.ts` — `staff 调用 POST /api/v1/orders/fulfill 返回 403` |
 
-### 说明
+### 业务决策
 
-发货核销会永久扣减 `current_quantity`，属于不可逆操作。
-若业务上仓库员工（staff）需要发货，则属于设计意图，OBS-02 可关闭。
-若只有管理员可操作，需将装饰器改为 `@admin_required`。
+主项目选择将 fulfill 限制为 admin-only（`@admin_required`），避免 staff 执行不可逆的库存扣减。

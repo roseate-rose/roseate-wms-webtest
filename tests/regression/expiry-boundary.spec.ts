@@ -8,7 +8,7 @@ function dateOffset(days: number): string {
   return d.toISOString().split('T')[0];
 }
 
-const TODAY       = dateOffset(0);   // should be classified as "warning" (NOT "expired")
+const TODAY       = dateOffset(0);   // expiry_date == today → "expired" (BUG-02 fixed: <= today)
 const TODAY_P30   = dateOffset(30);  // expiry_date <= today+30 → "warning" (inclusive bound)
 const TODAY_P31   = dateOffset(31);  // expiry_date > today+30 → "healthy"
 const TODAY_M1    = dateOffset(-1);  // expiry_date < today → "expired" (baseline check)
@@ -89,37 +89,31 @@ test.describe('[到期日边界] classify_expiry_status 分类逻辑', () => {
     expect(batch.status).toBe('healthy');
   });
 
-  // ── [已知缺陷] 今天到期 ────────────────────────────────────────────────────
+  // ── 今天到期（BUG-02 已修复）──────────────────────────────────────────────
   //
   // 业务语义：到期日 = 今天 → 商品今天到期，应标记为 expired。
   //
-  // 实际代码（backend/services/import_service.py line 13）：
-  //   `if expiry_date < today: return "expired"`
-  //   使用严格小于，今天到期判定为 warning。
-  //
-  // 以下测试断言"正确业务行为"，当前代码会导致失败，暴露该边界缺陷。
+  // 修复（commit 28e49eb）：将 `expiry_date < today` 改为 `expiry_date <= today`。
+  // 以下测试验证修复后的正确行为。
 
-  test('[已知缺陷] 到期日 = 今天 → 应为 expired，当前错误返回 warning', async ({ request }) => {
+  test('到期日 = 今天 → expired（BUG-02 修复验证）', async ({ request }) => {
     const token = await adminToken(request);
 
-    // Verify via expiry-report API: today's batch should appear in "expired" filter
+    // Today's batch must appear in "expired" filter
     const expiredResp = await request.get('/api/v1/inventory/expiry-report?status=expired', {
       headers: { Authorization: `Bearer ${token}` },
     });
     const expiredItems: any[] = (await expiredResp.json()).data.items;
     const batchInExpired = expiredItems.find((i: any) => i.batch_no === 'BN-BD-TODAY');
-
-    // WILL FAIL: today's batch is classified as "warning", so it won't be in the expired list
     expect(batchInExpired).toBeDefined();
-    // ↑ WILL FAIL — actual: batch appears under "warning" not "expired"
+    expect(batchInExpired.status).toBe('expired');
 
-    // Confirm it incorrectly appears in the "warning" filter (documents current wrong behavior)
+    // Must NOT appear in "warning" filter
     const warningResp = await request.get('/api/v1/inventory/expiry-report?status=warning', {
       headers: { Authorization: `Bearer ${token}` },
     });
     const warningItems: any[] = (await warningResp.json()).data.items;
     const batchInWarning = warningItems.find((i: any) => i.batch_no === 'BN-BD-TODAY');
-    // This assertion PASSES — confirming the bug: today's expiry shows as warning
-    expect(batchInWarning).toBeDefined();
+    expect(batchInWarning).toBeUndefined();
   });
 });
