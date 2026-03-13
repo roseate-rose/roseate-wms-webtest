@@ -9,18 +9,18 @@ Playwright E2E 测试项目，专用于对 **roseate-wms** 进行黑盒浏览器
 
 **主项目地址**：[https://github.com/roseate-rose/roseate-wms](https://github.com/roseate-rose/roseate-wms)
 
-本项目与主项目的关系：
+本项目是 **roseate-wms** 的独立 E2E 测试仓库，两者应克隆到同级目录下：
 
 ```
-~/Work/
+<workspace>/
 ├── roseate-wms/          ← 主项目（Flask + Vue 3，被测系统）
 └── roseate-wms-webtest/  ← 本项目（Playwright E2E，测试系统）
 ```
 
-`seed/seed.py` 通过 `sys.path` 直接 import 主项目 backend，操作主项目的 SQLite 数据库：
+`seed/seed.py` 通过相对路径 `../roseate-wms` 定位主项目，直接 import 其 backend 并操作 SQLite 数据库。也可通过环境变量覆盖数据库路径：
 
-```
-../roseate-wms/instance/roseate_wms.db
+```bash
+WMS_DB_PATH=/path/to/roseate_wms.db python3 seed/seed.py
 ```
 
 ---
@@ -88,7 +88,7 @@ webtest 通过以下文件理解主项目行为，编写测试前必须阅读：
 
 - Node.js 18+
 - Python 3.10+（需要能 import 主项目 backend）
-- 主项目已安装后端依赖：`pip install -r ~/Work/roseate-wms/backend/requirements.txt`
+- 主项目已安装后端依赖：`pip install -r ../roseate-wms/backend/requirements.txt`
 
 ## 初始安装
 
@@ -108,10 +108,10 @@ npm run setup   # 安装 Playwright Chromium 浏览器
 npm run seed
 
 # 步骤 3：启动主项目后端
-cd ~/Work/roseate-wms && python3 backend/app.py &
+cd ../roseate-wms && python3 backend/app.py &
 
 # 步骤 4：启动主项目前端（另一个终端）
-cd ~/Work/roseate-wms/frontend && npm run dev &
+cd ../roseate-wms/frontend && npm run dev &
 
 # 步骤 5：运行 E2E 测试
 npm test
