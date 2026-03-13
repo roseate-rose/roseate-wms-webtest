@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Bash(npx playwright:*)",
+      "Bash(python3 seed/seed.py 2>&1)",
+      "Bash(npm run:*)",
+      "Bash(gh repo:*)",
+      "Bash(git init:*)",
+      "Bash(git reset:*)",
+      "Bash(git rm:*)",
+      "Bash(rm -rf .git && git init && git add . && git status --short | head -20)"
+    ]
+  }
+}
