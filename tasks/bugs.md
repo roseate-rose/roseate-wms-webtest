@@ -14,6 +14,10 @@
 | BUG-05 | 🟡 中 | ✅ Fixed | `POST /api/v1/products` 改为 `@admin_required`（commit `4dfb0ad`） |
 | OBS-01 | 🟡 中 | ✅ Fixed | `/api/v1/inventory/test` 仅 debug 模式注册，生产返回 404（commit `4dfb0ad`） |
 | OBS-02 | 🟡 中 | ✅ Fixed | `orders/fulfill` 改为 `@admin_required`（commit `8a3f36a`） |
+| BUG-06 | 🔴 高 | Open | FIFO 未过滤过期批次，订单预占过期库存（客户收到过期商品）|
+| BUG-07 | 🔴 高 | Open | `/inventory/reserve` 创建孤儿预占：无订单记录、无释放 API，库存永久锁死 |
+| BUG-08 | 🟡 中 | Open | `find_product` 静默降级：hb_code 不存在时自动用 barcode 替代，不返回 404 |
+| OBS-03 | 🟡 中 | Open | 无订单取消 API：reserved 订单无法取消，预占库存无法通过正常流程释放 |
 
 ---
 
@@ -248,3 +252,172 @@ if barcode and Product.query.filter_by(barcode=barcode).first():
 ### 业务决策
 
 主项目选择将 fulfill 限制为 admin-only（`@admin_required`），避免 staff 执行不可逆的库存扣减。
+
+---
+
+## BUG-06 · FIFO 未过滤过期批次，订单预占过期库存
+
+| 字段 | 内容 |
+|------|------|
+| **状态** | 🔴 Open |
+| **严重度** | 高（客户可能收到过期商品，违反食品/化妆品安规） |
+| **位置** | `backend/app.py` `reserve_product_inventory()` |
+| **发现测试** | `tests/regression/fifo-expiry-filter.spec.ts` |
+
+### 问题代码
+
+```python
+batches = (
+    Batch.query.filter_by(hb_code=product.hb_code)
+    .order_by(Batch.expiry_date.asc(), Batch.id.asc())
+    .all()
+    # ← 未过滤 expiry_date <= today 的过期批次
+)
+```
+
+### 复现步骤
+
+```bash
+# 种子数据：HB001 有 BN-2024-01（expiry=2024-06-01，已过期，qty=50）
+POST /api/v1/orders/sync {"channel_name":"taobao","external_sku_id":"SKU-HB001","quantity":1}
+# → 200，allocations[0].expiry_date = "2024-06-01"（过期批次！）
+```
+
+### 期望 vs 实际
+
+| | 行为 |
+|--|--|
+| **期望** | FIFO 跳过过期批次，从 BN-2026-01（未过期）分配 |
+| **实际** | 从 BN-2024-01（已过期 21 个月）分配，expiry="2024-06-01" |
+
+### 建议修复
+
+```python
+today = date.today()
+batches = (
+    Batch.query.filter_by(hb_code=product.hb_code)
+    .filter(Batch.expiry_date > today)   # ← 只分配未过期批次
+    .order_by(Batch.expiry_date.asc(), Batch.id.asc())
+    .all()
+)
+```
+
+同时，`sellable_stock` 也应排除过期批次：
+```python
+@property
+def sellable_stock(self) -> int:
+    today = date.today()
+    return sum(
+        batch.available_quantity for batch in self.batches
+        if batch.available_quantity > 0 and batch.expiry_date > today
+    )
+```
+
+---
+
+## BUG-07 · /inventory/reserve 创建孤儿预占，库存永久锁死
+
+| 字段 | 内容 |
+|------|------|
+| **状态** | 🔴 Open |
+| **严重度** | 高（库存可被永久锁死，影响可售库存统计） |
+| **位置** | `backend/app.py:1193` `POST /api/v1/inventory/reserve` |
+| **发现测试** | `tests/regression/reserve-orphan.spec.ts` |
+
+### 问题
+
+`/inventory/reserve` 直接调用 `reserve_product_inventory()`，只修改 `batch.reserved_quantity`：
+- 不创建 `SalesOrder` 记录
+- 不创建 `OrderAllocation` 记录
+- 系统中没有 `/inventory/unreserve` 或订单取消端点
+
+结果：每次调用都永久增加 `reserved_quantity`，无法通过任何 API 路径释放。
+
+### 复现步骤
+
+```bash
+# 查询初始可售库存
+GET /api/v1/products/HB002 → sellable_stock=200
+
+POST /api/v1/inventory/reserve {"hb_code":"HB002","quantity":5}
+# → 200，reserved_quantity+5
+
+GET /api/v1/products/HB002 → sellable_stock=195  ← 永久减少
+GET /api/v1/orders?status=reserved               ← 没有对应订单
+# 没有任何 API 可恢复到 200
+```
+
+### 建议修复
+
+选项 A：移除此端点（直接使用 `orders/sync` 流程预占库存）
+选项 B：要求关联订单 ID，通过 `orders/cancel` 释放
+
+---
+
+## BUG-08 · find_product 静默降级：hb_code 不存在时使用 barcode
+
+| 字段 | 内容 |
+|------|------|
+| **状态** | 🟡 Open |
+| **严重度** | 中（入库到错误商品，但无报错，难以发现） |
+| **位置** | `backend/app.py:126` `find_product()` |
+| **发现测试** | `tests/regression/inbound-product-lookup.spec.ts` |
+
+### 问题代码
+
+```python
+def find_product(payload):
+    if hb_code:
+        product = Product.query.filter_by(hb_code=hb_code).first()
+        if product:
+            return product, None, None
+        # ← hb_code 有值但找不到时，直接 fall through！
+    if barcode:
+        ...  # 静默使用 barcode 匹配的商品
+```
+
+### 复现步骤
+
+```bash
+POST /api/v1/inventory/inbound {
+    "hb_code": "HB-GHOST-9999",   # 不存在
+    "barcode": "6901234567890",    # HB001 的 barcode
+    "batch_no": "BN-TEST", "expiry_date": "2030-01-01", "quantity": 1, "cost": 1.0
+}
+# 期望：404 (hb_code not found)
+# 实际：200，入库到 HB001（通过 barcode 匹配）
+```
+
+### 建议修复
+
+```python
+def find_product(payload):
+    if hb_code:
+        product = Product.query.filter_by(hb_code=hb_code).first()
+        if product:
+            return product, None, None
+        return None, f"product not found: {hb_code}", 404  # ← 明确报错
+    if barcode:
+        ...
+```
+
+---
+
+## OBS-03 · 无订单取消 API，reserved 预占无法释放
+
+| 字段 | 内容 |
+|------|------|
+| **状态** | 🟡 Open（功能缺失，建议补充） |
+| **严重度** | 中（运营无法撤销误操作，库存长期虚减） |
+| **位置** | 系统缺失 `DELETE /api/v1/orders/{id}` 或 `POST /api/v1/orders/cancel` |
+| **发现测试** | `tests/regression/reserve-orphan.spec.ts` — cancel 端点均返回 404 |
+
+### 场景
+
+- 客服告知买家取消订单，WMS 中无法撤销对应 reserved 订单
+- 重复下单（BUG-03 修复前）产生的多余订单无法清除
+- 仅有 fulfill（永久出库）路径，无法"反悔"
+
+### 建议
+
+新增 `POST /api/v1/orders/cancel` 端点，释放 allocations 中的 `reserved_quantity`，将订单状态变更为 `cancelled`。
